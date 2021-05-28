@@ -1,0 +1,41 @@
+#!/usr/bin/python
+import os
+import time
+import xcffib.xproto
+import xcffib
+
+
+class Window():
+    def __init__(self, conn, wid):
+        self.conn = conn
+        self.wid = wid
+    
+    def __get_atom(self, name):
+        return self.conn.core.InternAtom(True, len(name), name).reply().atom
+        
+    def get_property(self, prop, type):
+        return self.conn.core.GetProperty(
+                False, 
+                self.wid, 
+                self.__get_atom(prop),
+                self.__get_atom(type),
+                0, 
+                (2 ** 32) - 1).reply().value
+
+class Window_Manager():
+    def __init__(self):
+        self.conn = xcffib.Connection()
+        self.screen = self.conn.get_screen_pointers()[0]
+        self.root = Window(self.conn, self.screen.root)
+        self.__check_other_wm();
+
+    def __check_other_wm(self):
+        supporting_wm_wid = self.root.get_property("_NET_SUPPORTING_WM_CHECK", "WINDOW").to_atoms()
+        if len(supporting_wm_wid) > 0:
+            supporting_wm_wid = supporting_wm_wid[0]
+            supporting_wm = Window(self.conn, supporting_wm_wid)
+            existing_wmname = supporting_wm.get_property("_NET_WM_NAME", "UTF8_STRING").to_string()
+            if existing_wmname:
+                raise Exception("Another window manager ({}) is running.".format(existing_wmname))
+
+wm = Window_Manager()
