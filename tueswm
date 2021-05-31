@@ -1,41 +1,121 @@
 #!/usr/bin/python
 import os
 import time
-import xcffib.xproto
 import xcffib
+import xcffib.xproto
+WindowClass = xcffib.xproto.WindowClass
+CW = xcffib.xproto.CW
+EventMask = xcffib.xproto.EventMask
 
+# Returns the atom for any atom name.
+def get_atom(conn, name):
+    return conn.core.InternAtom(False, len(name), name).reply().atom
+
+# Calling conn.get_atom(...) is the same as get_atom(conn ...). It's just more python-y this way
+xcffib.Connection.get_atom = get_atom
 
 class Window():
     def __init__(self, conn, wid):
-        self.conn = conn
-        self.wid = wid
-    
-    def __get_atom(self, name):
-        return self.conn.core.InternAtom(True, len(name), name).reply().atom
+        self.conn = conn # Connection with X server
+        self.wid = wid # Window id of the window
         
     def get_property(self, prop, type):
         return self.conn.core.GetProperty(
                 False, 
                 self.wid, 
-                self.__get_atom(prop),
-                self.__get_atom(type),
+                self.conn.get_atom(prop),
+                self.conn.get_atom(type),
                 0, 
-                (2 ** 32) - 1).reply().value
+                (2 ** 32) - 1
+                ).reply().value
+
+    def set_property(self, prop, type, value):
+        if isinstance(value, str): 
+            value = value.encode() # encode the string as utf8
+            format = 8
+        elif isinstance(value, list): 
+            format = 32
+        else:
+            raise TypeError("value should be either a list of atoms or a string!")
+
+        self.conn.core.ChangeProperty(
+                xcffib.xproto.PropMode.Replace,
+                self.wid,
+                self.conn.get_atom(prop),
+                self.conn.get_atom(type),
+                format,
+                len(value),
+                value
+                )
+
+    def set_attributes(self, value_mask, value_list):
+        self.conn.core.ChangeWindowAttributes(self.wid, value_mask, valute_list)
+
 
 class Window_Manager():
     def __init__(self):
         self.conn = xcffib.Connection()
         self.screen = self.conn.get_screen_pointers()[0]
         self.root = Window(self.conn, self.screen.root)
-        self.__check_other_wm();
+        self.name = "tueswm"
+        self.__check_other_wm()
+        self.__make_supporting_window_for_wm_check()
+        self.__set_supported_atoms()
+
+    # from https://rosettacode.org/wiki/Window_creation/X11#Python
+    def create_window(self, x, y, w, h):
+        wid = self.conn.generate_id()
+        self.conn.core.CreateWindow(
+                self.screen.root_depth,
+                wid,
+                self.root.wid,
+                x,
+                y,
+                w,
+                h,
+                0,
+                WindowClass.InputOutput,
+                self.screen.root_visual,
+                CW.BackPixel | CW.EventMask,
+                [self.screen.white_pixel, EventMask.StructureNotify | EventMask.Exposure]
+                )
+        return Window(self.conn, wid)
 
     def __check_other_wm(self):
-        supporting_wm_wid = self.root.get_property("_NET_SUPPORTING_WM_CHECK", "WINDOW").to_atoms()
-        if len(supporting_wm_wid) > 0:
-            supporting_wm_wid = supporting_wm_wid[0]
-            supporting_wm = Window(self.conn, supporting_wm_wid)
-            existing_wmname = supporting_wm.get_property("_NET_WM_NAME", "UTF8_STRING").to_string()
+        supporting_wid = self.root.get_property("_NET_SUPPORTING_WM_CHECK", "WINDOW").to_atoms()
+        if len(supporting_wid) > 0:
+            supporting_wid = supporting_wid[0]
+            supporting_win = Window(self.conn, supporting_wid)
+            existing_wmname = supporting_win.get_property("_NET_WM_NAME", "UTF8_STRING").to_string()
             if existing_wmname:
                 raise Exception("Another window manager ({}) is running.".format(existing_wmname))
+
+    def __make_supporting_window_for_wm_check(self):
+        supporting_win = self.create_window(-1, -1, 1, 1)
+        supporting_win.set_property("_NET_SUPPORTING_WM_CHECK", "WINDOW",      [supporting_win.wid])
+        supporting_win.set_property("_NET_WM_NAME",             "UTF8_STRING", self.name)
+        self.root.set_property(     "_NET_SUPPORTING_WM_CHECK", "WINDOW",      [supporting_win.wid])
+
+    # https://en.wikipedia.org/wiki/Extended_Window_Manager_Hints
+    # The plan is to support all of them
+    def __set_supported_atoms(self):
+        self.root.set_property("_NET_SUPPORTED", "ATOM", [self.conn.get_atom(prop) for prop in [
+            "_NET_SUPPORTED",
+            "_NET_SUPPORTING_WM_CHECK",
+            "_NET_WM_NAME",
+            ]])
+
+    def __select_events(self):
+        self.root.set_attributes(EventList, [
+            EventMask.Structure |
+            EventMask.SubstructureRedirect |
+            EventMask.SubstructureNotify |
+            EventMask.ButtonPress |
+            EventMask.PointerMotion |
+            EventMask.EnterWindow |
+            EventMask.LeaveWindow |
+            EventMask.StructureNotify |
+            EventMask.PropertyChange])
+
 
 wm = Window_Manager()
