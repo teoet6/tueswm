@@ -8,8 +8,10 @@ WindowClass = xcffib.xproto.WindowClass
 CW = xcffib.xproto.CW
 EventMask = xcffib.xproto.EventMask
 
-# TODO The entire program should have only one connection.
-# Instead of storing a connection in every window we should just have a global `conn`
+conn = xcffib.Connection() # The connection to the X11 server
+screen = conn.get_screen_pointers()[0] # The first screen from the server. SCREEN AND MONITOR ARE NOT THE SAME TERMS!
+root = Window(conn, screen.root) # The root window
+name = "tueswm" # The name of the window manager
 
 # Returns the atom for any atom name.
 def get_atom(conn, name):
@@ -19,16 +21,16 @@ def get_atom(conn, name):
 xcffib.Connection.get_atom = get_atom
 
 class Window():
-    def __init__(self, conn, wid):
-        self.conn = conn # Connection with X server
+    def __init__(self, wid):
+        conn = conn # Connection with X server
         self.wid = wid # Window id of the window
         
     def get_property(self, prop, type):
-        return self.conn.core.GetProperty(
+        return conn.core.GetProperty(
                 False, 
                 self.wid, 
-                self.conn.get_atom(prop),
-                self.conn.get_atom(type),
+                conn.get_atom(prop),
+                conn.get_atom(type),
                 0, 
                 (2 ** 32) - 1
                 ).reply().value
@@ -42,110 +44,112 @@ class Window():
         else:
             raise TypeError("value should be either a list of atoms or a string!")
 
-        self.conn.core.ChangeProperty(
+        conn.core.ChangeProperty(
                 xcffib.xproto.PropMode.Replace,
                 self.wid,
-                self.conn.get_atom(prop),
-                self.conn.get_atom(type),
+                conn.get_atom(prop),
+                conn.get_atom(type),
                 format,
                 len(value),
                 value
                 )
 
     def set_attributes(self, value_mask, value_list):
-        self.conn.core.ChangeWindowAttributes(self.wid, value_mask, value_list)
+        conn.core.ChangeWindowAttributes(self.wid, value_mask, value_list)
 
+# from https://rosettacode.org/wiki/Window_creation/X11#Python
+def create_window(x, y, w, h):
+    wid = conn.generate_id()
+    conn.core.CreateWindow(
+            screen.root_depth,
+            wid,
+            root.wid,
+            x,
+            y,
+            w,
+            h,
+            0,
+            WindowClass.InputOutput,
+            screen.root_visual,
+            CW.BackPixel | CW.EventMask,
+            [screen.white_pixel, EventMask.StructureNotify | EventMask.Exposure]
+            )
+    return Window(conn, wid)
 
-class Window_Manager():
-    def __init__(self):
-        self.conn = xcffib.Connection()
-        self.screen = self.conn.get_screen_pointers()[0]
-        self.root = Window(self.conn, self.screen.root)
-        self.name = "tueswm"
-        self.__check_other_wm()
-        self.__make_supporting_window_for_wm_check()
-        self.__set_supported_atoms()
-        self.__select_events()
-        self.__set_default_cursor()
+def run():
+    conn.flush()
+    while True:
+        event = conn.wait_for_event()
+        if (isinstance(event, xcffib.xproto.MapRequestEvent)): map_request_event(event)
+        if (isinstance(event, xcffib.xproto.MotionNotifyEvent)): motion_notify_event(event)
+        if (isinstance(event, xcffib.xproto.KeyReleaseEvent)): key_release_event(event)
+        else: print(type(event))
 
-    # from https://rosettacode.org/wiki/Window_creation/X11#Python
-    def create_window(self, x, y, w, h):
-        wid = self.conn.generate_id()
-        self.conn.core.CreateWindow(
-                self.screen.root_depth,
-                wid,
-                self.root.wid,
-                x,
-                y,
-                w,
-                h,
-                0,
-                WindowClass.InputOutput,
-                self.screen.root_visual,
-                CW.BackPixel | CW.EventMask,
-                [self.screen.white_pixel, EventMask.StructureNotify | EventMask.Exposure]
-                )
-        return Window(self.conn, wid)
+# Checks if another wm is already running
+def check_other_wm():
+    supporting_wid = root.get_property("_NET_SUPPORTING_WM_CHECK", "WINDOW").to_atoms()
+    if len(supporting_wid) > 0:
+        supporting_wid = supporting_wid[0]
+        supporting_win = Window(conn, supporting_wid)
+        existing_wmname = supporting_win.get_property("_NET_WM_NAME", "UTF8_STRING").to_string()
+        if existing_wmname:
+            raise Exception("Another window manager ({}) is running.".format(existing_wmname))
 
-    def run(self):
-        self.conn.flush()
-        while True:
-            event = self.conn.wait_for_event()
-            #print(type(event))
-            if (isinstance(event, xcffib.xproto.MapRequestEvent)): self.__map_request_event(event)
+def make_supporting_window_for_wm_check():
+    supporting_win = create_window(-1, -1, 1, 1)
+    supporting_win.set_property("_NET_SUPPORTING_WM_CHECK", "WINDOW",      [supporting_win.wid])
+    supporting_win.set_property("_NET_WM_NAME",             "UTF8_STRING", name)
+    root.set_property(     "_NET_SUPPORTING_WM_CHECK", "WINDOW",      [supporting_win.wid])
 
-    # Checks if another wm is already running
-    def __check_other_wm(self):
-        supporting_wid = self.root.get_property("_NET_SUPPORTING_WM_CHECK", "WINDOW").to_atoms()
-        if len(supporting_wid) > 0:
-            supporting_wid = supporting_wid[0]
-            supporting_win = Window(self.conn, supporting_wid)
-            existing_wmname = supporting_win.get_property("_NET_WM_NAME", "UTF8_STRING").to_string()
-            if existing_wmname:
-                raise Exception("Another window manager ({}) is running.".format(existing_wmname))
+# Sets the supported atoms from the ewmh extension
+# https://en.wikipedia.org/wiki/Extended_Window_Manager_Hints
+# The plan is to support all of them
+def set_supported_atoms():
+    root.set_property("_NET_SUPPORTED", "ATOM", [conn.get_atom(prop) for prop in [
+        "_NET_SUPPORTED",
+        "_NET_SUPPORTING_WM_CHECK",
+        "_NET_WM_NAME",
+        ]])
 
-    def __make_supporting_window_for_wm_check(self):
-        supporting_win = self.create_window(-1, -1, 1, 1)
-        supporting_win.set_property("_NET_SUPPORTING_WM_CHECK", "WINDOW",      [supporting_win.wid])
-        supporting_win.set_property("_NET_WM_NAME",             "UTF8_STRING", self.name)
-        self.root.set_property(     "_NET_SUPPORTING_WM_CHECK", "WINDOW",      [supporting_win.wid])
+# Selects the events we want to listen to
+def select_events():
+    root.set_attributes(CW.EventMask, [
+        EventMask.KeyPress |
+        EventMask.KeyRelease |
+        EventMask.ButtonPress |
+        EventMask.ButtonRelease |
+        EventMask.EnterWindow |
+        EventMask.LeaveWindow |
+        EventMask.PointerMotion |
+        EventMask.KeymapState |
+        EventMask.Exposure |
+        EventMask.StructureNotify |
+        EventMask.ResizeRedirect |
+        EventMask.SubstructureNotify |
+        EventMask.SubstructureRedirect |
+        EventMask.FocusChange |
+        EventMask.PropertyChange])
 
-    # Sets the supported atoms from the ewmh extension
-    # https://en.wikipedia.org/wiki/Extended_Window_Manager_Hints
-    # The plan is to support all of them
-    def __set_supported_atoms(self):
-        self.root.set_property("_NET_SUPPORTED", "ATOM", [self.conn.get_atom(prop) for prop in [
-            "_NET_SUPPORTED",
-            "_NET_SUPPORTING_WM_CHECK",
-            "_NET_WM_NAME",
-            ]])
+# TODO
+def  set_default_cursor():
+    pass
 
-    # Selects the events we want to listen to
-    def __select_events(self):
-        self.root.set_attributes(CW.EventMask, [
-            EventMask.KeyPress |
-            EventMask.KeyRelease |
-            EventMask.ButtonPress |
-            EventMask.ButtonRelease |
-            EventMask.EnterWindow |
-            EventMask.LeaveWindow |
-            EventMask.PointerMotion |
-            EventMask.KeymapState |
-            EventMask.Exposure |
-            EventMask.StructureNotify |
-            EventMask.ResizeRedirect |
-            EventMask.SubstructureNotify |
-            EventMask.SubstructureRedirect |
-            EventMask.FocusChange |
-            EventMask.PropertyChange])
+# This function gets called when a window wants to get mapped i.e. when a window wants to be displayed
+def map_request_event(event):
+    print(dir(event))
 
-    # TODO
-    def  __set_default_cursor(self):
-        pass
+# This function gets called when the mouse pointer is moved
+def motion_notify_event(event):
+    pass
 
-    # This function gets called when a window wants to get mapped i.e. when a window wants to be displayed
-    def __map_request_event(self, event):
-        print(dir(event))
+# This funcron gets called when a key on the keyboard is released
+def key_release_event(event):
+    print(conn.code_to_syms(event.detail));
+    print(event.state);
 
-wm = Window_Manager()
-wm.run()
+check_other_wm()
+make_supporting_window_for_wm_check()
+set_supported_atoms()
+select_events()
+set_default_cursor()
+run()
