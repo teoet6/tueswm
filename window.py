@@ -1,3 +1,4 @@
+from config import conn
 import xcffib
 # Returns the atom for any atom name.
 def get_atom(conn, name):
@@ -7,9 +8,6 @@ xcffib.Connection.get_atom = get_atom
 
 import xcffib.xproto
 ConfigWindow = xcffib.xproto.ConfigWindow
-
-
-conn = None
 
 class Window():
     def __init__(self, wid):

@@ -1,24 +1,9 @@
 #!/usr/bin/python
+from config import conn, screen, name, border_width
 import xcffib
-# Returns the atom for any atom name.
-def get_atom(conn, name):
-    return conn.core.InternAtom(False, len(name), name).reply().atom
-# Calling conn.get_atom(...) is the same as get_atom(conn ...). It's just more python-y this way
-xcffib.Connection.get_atom = get_atom
-
 import xcffib.xproto
-CW = xcffib.xproto.CW
-EventMask = xcffib.xproto.EventMask
-WindowClass = xcffib.xproto.WindowClass
-
-import window
-Window = window.Window
-
-conn = xcffib.Connection() # The connection to the X11 server
-window.conn = conn # Set the connection for the window module
-screen = conn.get_screen_pointers()[0] # The first screen from the server. SCREEN AND MONITOR ARE NOT THE SAME TERMS!
-name = "tueswm" # The name of the window manager
-
+from xcffib.xproto import CW, EventMask, WindowClass
+from window import Window
 
 root = Window(screen.root) # The root window
 windows = {}
@@ -49,10 +34,12 @@ def run():
         elif isinstance(event, xcffib.xproto.ConfigureRequestEvent): configure_request_event(event)
         elif isinstance(event, xcffib.xproto.MapRequestEvent): map_request_event(event)
         elif isinstance(event, xcffib.xproto.DestroyNotifyEvent): destroy_notify_event(event)
+        elif isinstance(event, xcffib.xproto.MappingNotifyEvent): mapping_notify_event(event)
         else: print(type(event))
         conn.flush()
 
 def configure_request_event(event):
+    event.border_width=border_width
     Window(event.window).configure(event.x, event.y, event.width, event.height, event.border_width, event.sibling, event.stack_mode, event.value_mask)
 
 def map_request_event(event):
@@ -63,12 +50,15 @@ def map_request_event(event):
 def destroy_notify_event(event):
     del windows[event.window]
 
+def mapping_notify_event(event):
+    conn.refresh_keymap()
+
 # Checks if another wm is already running
 def check_other_wm():
     supporting_wid = root.get_property("_NET_SUPPORTING_WM_CHECK", "WINDOW").to_atoms()
     if len(supporting_wid) > 0:
         supporting_wid = supporting_wid[0]
-        supporting_win = Window(conn, supporting_wid)
+        supporting_win = Window(supporting_wid)
         existing_wmname = supporting_win.get_property("_NET_WM_NAME", "UTF8_STRING").to_string()
         if existing_wmname:
             raise Exception("Another window manager ({}) is running.".format(existing_wmname))
@@ -126,12 +116,16 @@ def select_events():
 def  set_default_cursor():
     pass
 
+def grab_keys():
+    pass
+
 def init():
     check_other_wm()
     make_supporting_window_for_wm_check()
     set_supported_atoms()
     select_events()
     set_default_cursor()
+    grab_keys()
     conn.flush()
 
 init()
