@@ -1,61 +1,27 @@
 #!/usr/bin/python
-import os
-import time
 import xcffib
-import xcffib.xproto
-
-WindowClass = xcffib.xproto.WindowClass
-CW = xcffib.xproto.CW
-EventMask = xcffib.xproto.EventMask
-
-conn = xcffib.Connection() # The connection to the X11 server
-screen = conn.get_screen_pointers()[0] # The first screen from the server. SCREEN AND MONITOR ARE NOT THE SAME TERMS!
-root = Window(conn, screen.root) # The root window
-name = "tueswm" # The name of the window manager
-
 # Returns the atom for any atom name.
 def get_atom(conn, name):
     return conn.core.InternAtom(False, len(name), name).reply().atom
-
 # Calling conn.get_atom(...) is the same as get_atom(conn ...). It's just more python-y this way
 xcffib.Connection.get_atom = get_atom
 
-class Window():
-    def __init__(self, wid):
-        conn = conn # Connection with X server
-        self.wid = wid # Window id of the window
-        
-    def get_property(self, prop, type):
-        return conn.core.GetProperty(
-                False, 
-                self.wid, 
-                conn.get_atom(prop),
-                conn.get_atom(type),
-                0, 
-                (2 ** 32) - 1
-                ).reply().value
+import xcffib.xproto
+CW = xcffib.xproto.CW
+EventMask = xcffib.xproto.EventMask
+WindowClass = xcffib.xproto.WindowClass
 
-    def set_property(self, prop, type, value):
-        if isinstance(value, str): 
-            value = value.encode() # encode the string as utf8
-            format = 8
-        elif isinstance(value, list): 
-            format = 32
-        else:
-            raise TypeError("value should be either a list of atoms or a string!")
+import window
+Window = window.Window
 
-        conn.core.ChangeProperty(
-                xcffib.xproto.PropMode.Replace,
-                self.wid,
-                conn.get_atom(prop),
-                conn.get_atom(type),
-                format,
-                len(value),
-                value
-                )
+conn = xcffib.Connection() # The connection to the X11 server
+window.conn = conn # Set the connection for the window module
+screen = conn.get_screen_pointers()[0] # The first screen from the server. SCREEN AND MONITOR ARE NOT THE SAME TERMS!
+name = "tueswm" # The name of the window manager
 
-    def set_attributes(self, value_mask, value_list):
-        conn.core.ChangeWindowAttributes(self.wid, value_mask, value_list)
+
+root = Window(screen.root) # The root window
+windows = {}
 
 # from https://rosettacode.org/wiki/Window_creation/X11#Python
 def create_window(x, y, w, h):
@@ -74,16 +40,28 @@ def create_window(x, y, w, h):
             CW.BackPixel | CW.EventMask,
             [screen.white_pixel, EventMask.StructureNotify | EventMask.Exposure]
             )
-    return Window(conn, wid)
+    return Window(wid)
 
 def run():
-    conn.flush()
     while True:
         event = conn.wait_for_event()
-        if (isinstance(event, xcffib.xproto.MapRequestEvent)): map_request_event(event)
-        if (isinstance(event, xcffib.xproto.MotionNotifyEvent)): motion_notify_event(event)
-        if (isinstance(event, xcffib.xproto.KeyReleaseEvent)): key_release_event(event)
+        if False: pass # So you can comment and move stuff around 
+        elif isinstance(event, xcffib.xproto.ConfigureRequestEvent): configure_request_event(event)
+        elif isinstance(event, xcffib.xproto.MapRequestEvent): map_request_event(event)
+        elif isinstance(event, xcffib.xproto.DestroyNotifyEvent): destroy_notify_event(event)
         else: print(type(event))
+        conn.flush()
+
+def configure_request_event(event):
+    Window(event.window).configure(event.x, event.y, event.width, event.height, event.border_width, event.sibling, event.stack_mode, event.value_mask)
+
+def map_request_event(event):
+    windows[event.window] = Window(event.window)
+    if windows[event.window].get_attributes().override_redirect: return
+    conn.core.MapWindow(event.window)
+    
+def destroy_notify_event(event):
+    del windows[event.window]
 
 # Checks if another wm is already running
 def check_other_wm():
@@ -112,44 +90,49 @@ def set_supported_atoms():
         ]])
 
 # Selects the events we want to listen to
+# All the possible events are listed but I commented the ones I dont want to respond to
 def select_events():
     root.set_attributes(CW.EventMask, [
-        EventMask.KeyPress |
-        EventMask.KeyRelease |
+        #EventMask.NoEvent |
+        #EventMask.KeyPress |
+        #EventMask.KeyRelease |
         EventMask.ButtonPress |
         EventMask.ButtonRelease |
         EventMask.EnterWindow |
         EventMask.LeaveWindow |
-        EventMask.PointerMotion |
-        EventMask.KeymapState |
+        #EventMask.PointerMotion |
+        #EventMask.PointerMotionHint |
+        #EventMask.Button1Motion |
+        #EventMask.Button2Motion |
+        #EventMask.Button3Motion |
+        #EventMask.Button4Motion |
+        #EventMask.Button5Motion |
+        #EventMask.ButtonMotion |
+        #EventMask.KeymapState |
         EventMask.Exposure |
+        EventMask.VisibilityChange |
         EventMask.StructureNotify |
         EventMask.ResizeRedirect |
-        EventMask.SubstructureNotify |
+        #EventMask.SubstructureNotify |
         EventMask.SubstructureRedirect |
-        EventMask.FocusChange |
-        EventMask.PropertyChange])
+        #EventMask.FocusChange |
+        #EventMask.PropertyChange |
+        #EventMask.ColorMapChange |
+        #EventMask.OwnerGrabButton |
+        0 # Zero at the end so you can comment and uncomment without worrying about the pipes
+    ])
 
 # TODO
 def  set_default_cursor():
     pass
 
-# This function gets called when a window wants to get mapped i.e. when a window wants to be displayed
-def map_request_event(event):
-    print(dir(event))
+def init():
+    check_other_wm()
+    make_supporting_window_for_wm_check()
+    set_supported_atoms()
+    select_events()
+    set_default_cursor()
+    conn.flush()
 
-# This function gets called when the mouse pointer is moved
-def motion_notify_event(event):
-    pass
-
-# This funcron gets called when a key on the keyboard is released
-def key_release_event(event):
-    print(conn.code_to_syms(event.detail));
-    print(event.state);
-
-check_other_wm()
-make_supporting_window_for_wm_check()
-set_supported_atoms()
-select_events()
-set_default_cursor()
+init()
 run()
