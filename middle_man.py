@@ -1,6 +1,6 @@
 import xcffib
 import xcffib.xproto
-from xcffib.xproto import CW, EventMask, WindowClass, ConfigWindow
+from xcffib.xproto import CW, EventMask, WindowClass, ConfigWindow, ModMask, ButtonMask, Cursor, GrabMode
 import config
 
 class Atom_Cache():
@@ -15,6 +15,43 @@ class Atom_Cache():
 class Window():
     def __init__(self, wid):
         self.wid = wid # Window id of the window
+        self.__mapped = False
+        self.set_attributes(CW.EventMask, [
+            #EventMask.NoEvent |
+            #EventMask.KeyPress |
+            #EventMask.KeyRelease |
+            #EventMask.ButtonPress |
+            #EventMask.ButtonRelease |
+            EventMask.EnterWindow |
+            #EventMask.LeaveWindow |
+            #EventMask.PointerMotion |
+            #EventMask.PointerMotionHint |
+            #EventMask.Button1Motion |
+            #EventMask.Button2Motion |
+            #EventMask.Button3Motion |
+            #EventMask.Button4Motion |
+            #EventMask.Button5Motion |
+            #EventMask.ButtonMotion |
+            #EventMask.KeymapState |
+            #EventMask.Exposure |
+            #EventMask.VisibilityChange |
+            #EventMask.StructureNotify |
+            #EventMask.ResizeRedirect |
+            #EventMask.SubstructureNotify |
+            #EventMask.SubstructureRedirect |
+            EventMask.FocusChange |
+            #EventMask.PropertyChange |
+            #EventMask.ColorMapChange |
+            #EventMask.OwnerGrabButton |
+            0 # Zero at the end so you can comment and uncomment without worrying about the pipes
+        ])
+        self.update_button_binds()
+        self.configure(border_width = config.border_width)
+        self.set_attributes(CW.BorderPixel, [config.border_color_normal])
+        self.x = None
+        self.y = None
+        self.w = None
+        self.h = None
         
     def get_property(self, prop, type):
         return mm.conn.core.GetProperty(
@@ -51,21 +88,40 @@ class Window():
     def set_attributes(self, value_mask, value_list):
         mm.conn.core.ChangeWindowAttributes(self.wid, value_mask, value_list)
 
+    def __update_geometry(self):
+        if not self.__mapped: return
+        g = mm.conn.core.GetGeometry(self.wid).reply()
+        self.x, self.y, self.w, self.h = g.x, g.y, g.width, g.height
+
+    @property
+    def mapped(self):
+        return self.__mapped
+
+    @mapped.setter
+    def mapped(self, v):
+        self.__mapped = v
+        self.__update_geometry()
+
     def configure(self, x=None, y=None, w=None, h=None, border_width=None, sibling=None, stack_mode=None, value_mask=None):
+        border_width = config.border_width
         value_list = []
         if value_mask is None:
             value_mask = 0
             if x is not None:
                 value_mask |= ConfigWindow.X
+                self.x = x
                 value_list.append(x)
             if y is not None:
                 value_mask |= ConfigWindow.Y
+                self.y = y
                 value_list.append(y)
             if w is not None:
                 value_mask |= ConfigWindow.Width
+                self.w = w
                 value_list.append(w)
             if h is not None:
                 value_mask |= ConfigWindow.Height
+                self.h = h
                 value_list.append(h)
             if border_width is not None:
                 value_mask |= ConfigWindow.BorderWidth
@@ -85,21 +141,54 @@ class Window():
             if value_mask & ConfigWindow.Sibling: value_list.append(sibling)
             if value_mask & ConfigWindow.StackMode: value_list.append(stack_mode)
         mm.conn.core.ConfigureWindow(self.wid, value_mask, value_list)
+        mm.conn.flush()
+        self.__update_geometry()
 
-    def set_geometry(self, x=None, y=None, w=None, h=None):
-        if x is not None: self.x = x
-        if y is not None: self.y = y
-        if w is not None: self.w = w
-        if h is not None: self.h = h
-        self.configure(x=self.x, y=self.y, w=self.w, h=self.h)
+    def update_button_binds(self):
+        if mm.manager is None: return
+        mm.conn.core.UngrabButton(0, self.wid, ModMask.Any)
+        for b in mm.manager.button_binds:
+            mm.conn.core.GrabButton(
+                False,
+                self.wid, 
+                EventMask.ButtonPress | EventMask.ButtonRelease,
+                GrabMode.Async,
+                GrabMode.Async, 
+                0, # Wid of the window to confine to (0 means none)
+                Cursor._None, 
+                b.button, 
+                b.mods
+            )
+
+class Bind():
+    def __init__(self, mods, key, action, args=None):
+        self.mods = mods
+        self.key = key
+        self.__action = action
+        self.__args = args
+
+    def action(self, arg):
+        if self.__args is None: self.__action(arg)
+        else: self.__action(arg, *self.__args)
+    
+    @property
+    def button(self):
+        return self.key
+
+    @button.setter
+    def button(self, v):
+        self.key = v
 
 class Middle_Man():
     def __init__(self):
         self.conn = xcffib.Connection()
         self.setup = self.conn.setup
         self.screen = self.conn.get_screen_pointers()[0]
-        self.root = Window(self.screen.root)
         self.atoms = Atom_Cache()
+        self.__manager = None
+        self.windows = {}
+        self.root = None
+        self.focus = None
 
     # from https://rosettacode.org/wiki/Window_creation/X11#Python
     def create_window(self,x, y, w, h):
@@ -121,6 +210,9 @@ class Middle_Man():
         return Window(wid)
 
     def become_wm(self):
+        # This should happen in init but because the Window class uses mm it causes a circullar dependency. Become wm should happen right after mm has been initiated so i just put it here
+        self.root = Window(self.screen.root)
+
         # Check if another wm is already running
         supporting_wid = self.root.get_property("_NET_SUPPORTING_WM_CHECK", "WINDOW").to_atoms()
         if len(supporting_wid) > 0:
@@ -150,11 +242,11 @@ class Middle_Man():
             #EventMask.NoEvent |
             #EventMask.KeyPress |
             #EventMask.KeyRelease |
-            #EventMask.ButtonPress |
-            #EventMask.ButtonRelease |
+            EventMask.ButtonPress |
+            EventMask.ButtonRelease |
             EventMask.EnterWindow |
-            EventMask.LeaveWindow |
-            #EventMask.PointerMotion |
+            #EventMask.LeaveWindow |
+            EventMask.PointerMotion |
             #EventMask.PointerMotionHint |
             #EventMask.Button1Motion |
             #EventMask.Button2Motion |
@@ -163,40 +255,106 @@ class Middle_Man():
             #EventMask.Button5Motion |
             #EventMask.ButtonMotion |
             #EventMask.KeymapState |
-            EventMask.Exposure |
+            #EventMask.Exposure |
             EventMask.VisibilityChange |
             EventMask.StructureNotify |
             EventMask.ResizeRedirect |
-            #EventMask.SubstructureNotify |
+            EventMask.SubstructureNotify |
             EventMask.SubstructureRedirect |
-            #EventMask.FocusChange |
-            #EventMask.PropertyChange |
+            EventMask.FocusChange |
+            EventMask.PropertyChange |
             #EventMask.ColorMapChange |
             #EventMask.OwnerGrabButton |
             0 # Zero at the end so you can comment and uncomment without worrying about the pipes
         ])
         self.conn.flush()
 
-    def run(self):
-        while True:
-            event = self.conn.wait_for_event()
+    @property
+    def manager(self):
+        return self.__manager
+
+    @manager.setter
+    def manager(self, v):
+        self.__manager = v
+
+        for wid, win in self.windows.items():
+            win.update_button_binds()
+
+    def switch_focus(self, wid):
+        if mm.focus: self.windows[mm.focus].set_attributes(CW.BorderPixel, [config.border_color_normal])
+        mm.focus = wid
+        self.windows[mm.focus].set_attributes(CW.BorderPixel, [config.border_color_active])
+
+    def wait_for_event(self):
+        try:
+            return self.conn.wait_for_event()
+        except xcffib.xproto.WindowError: # There are a lot of random window errors. All wm's Ive seen just ignore them so im willing to do the same
+            pass
+        except xcffib.xproto.MatchError: # There are a lot of random window errors. All wm's Ive seen just ignore them so im willing to do the same
+            pass
+
+    def handle_event(self, event):
             if False: pass # So you can comment and move stuff around 
-            elif isinstance(event, xcffib.xproto.ConfigureRequestEvent): self.__event_configure_request(event)
-            elif isinstance(event, xcffib.xproto.MapRequestEvent): self.__event_map_request(event)
+            elif isinstance(event, xcffib.xproto.CreateNotifyEvent): self.__event_create_notify(event)
             elif isinstance(event, xcffib.xproto.DestroyNotifyEvent): self.__event_destroy_notify(event)
+            elif isinstance(event, xcffib.xproto.ConfigureRequestEvent): self.__event_configure_request(event)
+            elif isinstance(event, xcffib.xproto.ConfigureNotifyEvent): pass # All is handeled by ConfigureRequest
+            elif isinstance(event, xcffib.xproto.MapRequestEvent): self.__event_map_request(event)
+            elif isinstance(event, xcffib.xproto.MapNotifyEvent): pass # All is handeled by MapRequest
+            elif isinstance(event, xcffib.xproto.UnmapNotifyEvent): self.__event_unmap_notify(event)
+            elif isinstance(event, xcffib.xproto.ButtonPressEvent): self.__event_button_press(event)
+            elif isinstance(event, xcffib.xproto.ButtonReleaseEvent): self.__event_button_release(event)
+            elif isinstance(event, xcffib.xproto.MotionNotifyEvent): pass # We don't care if the mouse is moved
+            elif isinstance(event, xcffib.xproto.EnterNotifyEvent): self.__event_enter_notify(event)
+            elif isinstance(event, xcffib.xproto.FocusInEvent): self.__event_focus_in(event)
             else: print(type(event))
             self.conn.flush()
 
+    def run(self):
+        while True:
+            event = self.wait_for_event()
+            if event is None: continue
+            self.handle_event(event)
+
+    def __event_create_notify(self, event):
+        self.windows[event.window] = Window(event.window)
+        if self.manager: self.manager.on_window_created(self.windows[event.window])
+
+    def __event_destroy_notify(self, event):
+        del self.windows[event.window]
+        if self.manager: self.manager.on_window_destroyed(event.window)
+
     def __event_configure_request(self, event):
-        Window(event.window).configure(event.x, event.y, event.width, event.height, event.border_width, event.sibling, event.stack_mode, event.value_mask)
+        self.windows[event.window].configure(event.x, event.y, event.width, event.height, event.border_width, event.sibling, event.stack_mode, event.value_mask)
 
     def __event_map_request(self, event):
-        win = Window(event.window)
-        if win.get_attributes().override_redirect: return
+        if self.windows[event.window].get_attributes().override_redirect: return
         self.conn.core.MapWindow(event.window)
+        self.windows[event.window].mapped = True
+        if self.manager: self.manager.on_window_changed(event.window)
     
-    def __event_destroy_notify(self, event):
-        pass
+    def __event_unmap_notify(self, event):
+        self.windows[event.window].mapped = False
+        if self.manager: self.manager.on_window_changed(event.window)
+
+    def __event_button_press(self, event):
+        # The mask includes the butons by default. Since we won't have multibutton button binds
+        # We just get the modkeys from the mask
+        event.state &= 0xff
+        for b in self.manager.button_binds:
+            if b.mods == event.state and b.button == event.detail:
+                b.action(event.event)
+
+    def __event_button_release(self, event):
+        event.state &= 0xff
+
+    def __event_enter_notify(self, event):
+        if event.event == self.root.wid: return
+        self.switch_focus(event.event)
+
+    def __event_focus_in(self, event):
+        if event.event == self.root.wid: return
+        self.switch_focus(event.event)
 
 mm = Middle_Man()
 mm.become_wm()

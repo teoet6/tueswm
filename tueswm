@@ -1,5 +1,8 @@
 #!/bin/python 
 
 from middle_man import mm
+from manager import Default_Manager
 
+default_manager = Default_Manager()
+mm.manager = default_manager
 mm.run()
