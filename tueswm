@@ -1,8 +1,372 @@
-#!/bin/python 
+#!/bin/python
+import Xlib 
+import Xlib.X as xconst
+import Xlib.XK as xkeys
+import Xlib.display as xdisplay
+import Xlib.protocol.event as xevent
+import Xlib.xobject.drawable as xdrawable
 
-from middle_man import mm
-from manager import Default_Manager
+def win_from_wid(wid):
+    return display.create_resource_object('window', wid)
 
-default_manager = Default_Manager()
-mm.manager = default_manager
-mm.run()
+# I wanted to have mousebinds as well but this could not happen :C
+class Bind():
+    def __init__(self, mods, key, action, *args):
+        self.mods = mods
+        self.key = key if isinstance(key, int) else xkeys.string_to_keysym(key)
+        self.action = action
+        self.args = args
+
+# Class for a client
+class Client():
+    def __init__(self, win):
+        if isinstance(win, int): 
+            win = win_from_wid(win)
+        self.win = win
+
+    def move_resize(self, x, y, w, h):
+        self.win.configure(x = x, y = y, width = w - border_width * 2, height = h - border_width * 2)
+
+# You should use a different color palette for each window type
+class Palette():
+    def __init__(self, border):
+        self.border = border
+
+# Layout base class
+class Layout():
+    def __init__(self):
+        pass
+    def tile(self):
+        pass
+
+# The client stack is a datastructure that has an index to some element
+# When inserting or deleting from the structure the index is updated accordingly so it points to the same element
+class Client_Stack():
+    def __init__(self):
+        self.__items = []
+        self.selected = None
+
+    def __getitem__(self, ind):
+        if ind is None: ind = self.selected
+        if ind is None: return
+        ind %= len(self.__items)
+        return self.__items[ind]
+
+    def __setitem__(self, ind, v):
+        if ind is None: ind = self.selected
+        if ind is None: return
+        ind %= len(self.__items)
+        self.__items[ind] = v
+
+    def __delitem__(self, ind):
+        if ind is None: ind = self.selected
+        if ind is None: return
+        ind %= len(self.__items)
+        del self.__items[ind]
+        if len(self.__items) == 0: self.selected = None
+        if self.selected is not None and self.selected != 0 and self.selected >= ind: self.selected -= 1
+
+    def __len__(self):
+        return len(self.__items)
+
+    def insert(self, ind, c):
+        self.__items.insert(ind, c)
+        if self.selected is not None and self.selected >= ind: 
+            self.selected += 1
+
+    def __iter__(self):
+        yield from self.__items
+
+# A virtual desktop
+class Desktop():
+    def __init__(self, layout = None, master_ratio = None):
+        self.layout = layouts[0] if layout is None else layout
+        self.master_ratio = 0.5 if master_ratio is None else master_ratio
+        self.__stack = Client_Stack()
+
+    def focus(self, ind):
+        if ind is None: return
+        if self.__stack.selected is not None: self.__stack[None].win.change_attributes(border_pixel = palette_normal.border) 
+        ind %= len(self.__stack)
+        self.__stack.selected = ind
+        if self.__stack.selected is not None:
+            self.__stack[None].win.raise_window()
+            self.__stack[None].win.change_attributes(border_pixel = palette_active.border)
+            self.__stack[None].win.set_input_focus(xconst.RevertToParent, xconst.CurrentTime)
+
+    def focused(self):
+        return self.__stack.selected
+
+    def insert(self, ind, c):
+        self.__stack.insert(ind, c)
+        self.layout.tile()
+
+    def __getitem__(self, ind):
+        return self.__stack[ind]
+
+    def __setitem__(self, ind, v):
+        self.__stack[ind] = v
+
+    def __len__(self):
+        return len(self.__stack)
+
+    def __delitem__(self, ind):
+        if self.__stack[ind] is not None: self.__stack[ind].win.change_attributes(border_pixel = palette_normal.border)
+        del self.__stack[ind]
+        self.focus(self.__stack.selected)
+        self.layout.tile()
+
+    def __iter__(self):
+        yield from self.__stack
+
+# Master-slave layout
+"""
++---------+----------+
+|         |    2     |
+|         |          |
+|         +----------+
+|    1    |    3     |
+|         |          |
+|         +----------+
+|         |    4     |
+|         |          |
++---------+----------+
+"""
+class Layout_Vertical_Master(Layout):
+    def tile(self):
+        stack = cur_desktop
+        master_ratio = cur_desktop.master_ratio
+        if len(stack) == 0: return
+        if len(stack) == 1:
+            stack[0].move_resize(warea_x, warea_y, warea_w, warea_h)
+            return
+
+        stack[0].move_resize(warea_x, warea_y, int(warea_w * master_ratio), warea_h)
+        slave_h = int(warea_h / (len(stack) - 1))
+        for i in range(1, len(stack)):
+            stack[i].move_resize(int(warea_w * master_ratio), slave_h * (i - 1), int(warea_w * (1 - master_ratio)), slave_h)
+
+# All fullscreen layout
+# All the windows are behind the focused one
+"""
++--------------------+
+|                    |
+|                    |
+|                    |
+|         1          |
+|                    |
+|                    |
+|                    |
+|                    |
++--------------------+
+"""
+class Layout_Fullscreen(Layout):
+    def tile(self):
+        for c in cur_desktop:
+            c.move_resize(warea_x, warea_y, warea_w, warea_h)
+
+import subprocess
+def spawn(event, command):
+    subprocess.Popen(command)
+
+def inc_select(event, inc):
+    if cur_desktop.focused() is not None: 
+        cur_desktop.focus(cur_desktop.focused() + inc)
+
+def inc_move(event, inc):
+    if len(cur_desktop) < 2: return
+    cur_desktop[cur_desktop.focused() + inc], cur_desktop[None] = cur_desktop[None], cur_desktop[cur_desktop.focused() + inc]
+    cur_desktop.focus(cur_desktop.focused() + inc)
+    cur_desktop.layout.tile()
+
+def master_select(event):
+    if len(cur_desktop) < 1: return
+    cur_desktop.focus(0)
+
+def master_move(event):
+    cur_desktop[0], cur_desktop[None] = cur_desktop[None], cur_desktop[0]
+    cur_desktop.focus(0)
+    cur_desktop.layout.tile()
+
+def inc_move(event, inc):
+    if len(cur_desktop) < 2: return
+    cur_desktop[cur_desktop.focused() + inc], cur_desktop[None] = cur_desktop[None], cur_desktop[cur_desktop.focused() + inc]
+    cur_desktop.focus(cur_desktop.focused() + inc)
+    cur_desktop.layout.tile()
+
+def close_window(event):
+    if cur_desktop[None] is None: return
+    cur_desktop[None].win.send_event(xevent.ClientMessage(
+        window = cur_desktop[None].win,
+        client_type = display.get_atom("WM_PROTOCOLS"),
+        data = (32, [display.get_atom("WM_DELETE_WINDOW"), xconst.CurrentTime, 0, 0, 0])))
+
+def set_layout(event, layout):
+    cur_desktop.layout = layout
+    cur_desktop.layout.tile()
+    
+def desktop_set(event, desktop):
+    global cur_desktop
+    for c in cur_desktop:
+        c.win.unmap()
+    cur_desktop = desktop
+    for i in range(len(cur_desktop)):
+        cur_desktop[i].win.map()
+        cur_desktop.focus(cur_desktop.focused()) # Draw the active border
+    cur_desktop.layout.tile()
+
+def desktop_move(event, desktop):
+    global cur_desktop
+    desktop.insert(0, cur_desktop[None])
+    desktop.focus(0)
+    cur_desktop[None].win.unmap()
+    del cur_desktop[None]
+
+#CONFIG:
+
+palette_normal = Palette(0x808080)
+palette_active = Palette(0x800000)
+layouts = [Layout_Vertical_Master(), Layout_Fullscreen()]
+desktops = [Desktop(), Desktop()]
+border_width = 3
+gap_width = 10
+
+key_binds = [
+    Bind(xconst.Mod4Mask,                    "space",  spawn,         ["dmenu_run"]),
+    Bind(xconst.Mod4Mask | xconst.ShiftMask, "space",  spawn,         ["xterm"]),
+    Bind(xconst.Mod4Mask,                    "W",      spawn,         ["randomwall"]),
+    Bind(xconst.Mod4Mask,                    "J",      inc_select,    +1),
+    Bind(xconst.Mod4Mask,                    "K",      inc_select,    -1),
+    Bind(xconst.Mod4Mask | xconst.ShiftMask, "J",      inc_move,      +1),
+    Bind(xconst.Mod4Mask | xconst.ShiftMask, "K",      inc_move,      -1),
+    Bind(xconst.Mod4Mask,                    "T",      set_layout,    layouts[0]),
+    Bind(xconst.Mod4Mask,                    "M",      set_layout,    layouts[1]),
+    Bind(xconst.Mod4Mask,                    "1",      desktop_set,   desktops[0]),
+    Bind(xconst.Mod4Mask,                    "2",      desktop_set,   desktops[1]),
+    Bind(xconst.Mod4Mask | xconst.ShiftMask, "1",      desktop_move,  desktops[0]),
+    Bind(xconst.Mod4Mask | xconst.ShiftMask, "2",      desktop_move,  desktops[1]),
+    Bind(xconst.Mod4Mask,                    "Return", master_select),
+    Bind(xconst.Mod4Mask | xconst.ShiftMask, "Return", master_move),
+    Bind(xconst.Mod4Mask,                    "C",      close_window),
+]
+
+ignored_mods = [xconst.LockMask, xconst.Mod2Mask] # List of mods we want to ignore i.e. a bind will happen wether or not capslock is on
+
+#CONFIG END
+
+try:
+    global display
+    display = xdisplay.Display()
+except:
+    print("Error opening display.")
+    quit()
+root = display.screen().root
+screen_w = display.screen().width_in_pixels
+screen_h = display.screen().height_in_pixels
+warea_x = 0
+warea_y = 0
+warea_w = screen_w
+warea_h = screen_h
+clients = {}
+cur_desktop = desktops[0]
+
+def check_other_wm():
+    supporting_wids = root.get_property(
+        display.get_atom("_NET_SUPPORTING_WM_CHECK"), 
+        display.get_atom("WINDOW"),
+        0,
+        (2 ** 32) - 1
+    )
+    if supporting_wids is None: return
+    supporting_wids = supporting_wids.value
+    if supporting_wids:
+        supporting_win = win_from_wid(supporting_wids[0])
+        existing_wm_name = supporting_win.get_property(
+            display.get_atom("_NET_WM_NAME"),
+            display.get_atom("UTF8_STRING"),
+            0,
+            (2 ** 32) - 1
+        )
+        if existing_wm_name is None: return
+        existing_wm_name = existing_wm_name.value
+        if existing_wm_name:
+            print("Another wm ({}) is running".format(existing_wm_name.decode()))
+            quit()
+
+# TODO test
+def combine_masks(masks):
+    combinations = []
+    for combination_mask in range(2 ** len(ignored_mods)):
+        combination = 0
+        for i in range(len(ignored_mods)):
+            if (1 << i) & combination_mask: combination |= ignored_mods[i]
+        combinations.append(combination)
+    return combinations
+
+def init():
+    # grab_keys
+    extra_mods = combine_masks(ignored_mods)
+    for kb in key_binds:
+        for mods in extra_mods:
+            code = display.keysym_to_keycode(kb.key)
+            if code != 0:
+                root.grab_key(code, kb.mods | mods, True, xconst.GrabModeAsync, xconst.GrabModeAsync)
+
+    # select events
+    root.change_attributes(event_mask = xconst.SubstructureNotifyMask | xconst.SubstructureRedirectMask)
+
+# TODO test
+def to_modmask(mask, ignore_list = []):
+    ignore_mask = 0
+    for m in ignore_list: ignore_mask |= m
+    return mask & 0xff & ~ignore_mask
+
+def handle_configure_request(event):
+    kwargs = {}
+    #if event.window.id not in [wid for wid in clients]:
+    if event.value_mask & xconst.CWX: kwargs['x'] = event.x
+    if event.value_mask & xconst.CWY: kwargs['y'] = event.y
+    if event.value_mask & xconst.CWWidth: kwargs['width'] = event.width
+    if event.value_mask & xconst.CWHeight: kwargs['height'] = event.height
+    kwargs['border_width'] = border_width
+    if event.value_mask & xconst.CWSibling: kwargs['sibling'] = event.sibling
+    if event.value_mask & xconst.CWStackMode: kwargs['stack_mode'] = event.stack_mode
+    event.window.configure(**kwargs)
+
+def handle_map_request(event):
+    clients[event.window.id] = Client(event.window.id)
+    event.window.map()
+    cur_desktop.insert(0, Client(event.window.id))
+    cur_desktop.focus(0)
+
+def handle_destroy_notify(event):
+    if event.window.id in clients: del clients[event.window.id]
+    for d in desktops:
+        for i in range(len(d)):
+            if d[i].win.id == event.window.id:
+                del d[i]
+                break
+
+def handle_key_press(event):
+    mods = to_modmask(event.state, ignored_mods)
+    for kb in key_binds:
+        if display.keysym_to_keycode(kb.key) == event.detail and kb.mods == mods:
+            kb.action(event, *kb.args)
+    pass
+
+handlers = {
+    xevent.MapRequest: handle_map_request,
+    xevent.ConfigureRequest: handle_configure_request,
+    xevent.DestroyNotify: handle_destroy_notify,
+    xevent.KeyPress: handle_key_press,
+}
+
+def run():
+    while True:
+        event = display.next_event()
+        if type(event) in handlers: handlers[type(event)](event)
+        #else: print(type(event))
+
+check_other_wm()
+init()
+run()
